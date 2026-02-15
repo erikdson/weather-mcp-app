@@ -4,7 +4,7 @@ import cors from "cors";
 import express from "express";
 import { createServer } from "./server.js";
 
-const PORT = parseInt(process.env.PORT || "3001");
+const PORT = parseInt(process.env.PORT || "3847");
 
 const app = express();
 app.use(cors());
