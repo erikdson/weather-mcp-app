@@ -5,6 +5,7 @@ import {
   registerAppResource,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
+import { z } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { geocodeLocation, fetchForecast } from "./src/api/open-meteo.js";
@@ -24,23 +25,11 @@ export function createServer() {
       title: "Get Weather Forecast",
       description:
         "Returns a 7-day weather forecast for a location. Accepts a city name (e.g. 'Stockholm') or latitude/longitude coordinates.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          location: {
-            type: "string",
-            description: "City name to get weather for",
-          },
-          latitude: {
-            type: "number",
-            description: "Latitude (use with longitude to skip geocoding)",
-          },
-          longitude: {
-            type: "number",
-            description: "Longitude (use with latitude to skip geocoding)",
-          },
-        },
-      },
+      inputSchema: z.object({
+        location: z.string().optional().describe("City name to get weather for"),
+        latitude: z.number().optional().describe("Latitude (use with longitude to skip geocoding)"),
+        longitude: z.number().optional().describe("Longitude (use with latitude to skip geocoding)"),
+      }),
       _meta: { ui: { resourceUri: RESOURCE_URI } },
     },
     async ({
@@ -120,16 +109,10 @@ export function createServer() {
     {
       title: "Search Locations",
       description: "Search for locations by name for weather lookup.",
-      inputSchema: {
-        type: "object" as const,
-        properties: {
-          query: {
-            type: "string",
-            description: "City name to search for",
-          },
-        },
-        required: ["query"],
-      },
+      inputSchema: z.object({
+        query: z.string().describe("City name to search for"),
+      }),
+      _meta: {},
     },
     async ({ query }: { query: string }) => {
       try {
