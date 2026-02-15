@@ -1,6 +1,6 @@
 // src/components/SearchBar.tsx
 import { useState, useRef, useEffect } from "react";
-import { Search, MapPin, X } from "lucide-react";
+import { Search, X } from "lucide-react";
 import type { App } from "@modelcontextprotocol/ext-apps";
 import type { Location } from "../types";
 
@@ -13,7 +13,6 @@ export function SearchBar({ app, onLocationSelect }: SearchBarProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Location[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
-  const [geoError, setGeoError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -34,7 +33,6 @@ export function SearchBar({ app, onLocationSelect }: SearchBarProps) {
 
   const handleInput = (value: string) => {
     setQuery(value);
-    setGeoError(null);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (value.length < 2) {
       setResults([]);
@@ -69,29 +67,6 @@ export function SearchBar({ app, onLocationSelect }: SearchBarProps) {
     setQuery(`${loc.name}, ${loc.country}`);
     setShowDropdown(false);
     onLocationSelect(loc);
-  };
-
-  const handleGeolocation = () => {
-    setGeoError(null);
-    if (!navigator.geolocation) {
-      setGeoError("Geolocation not available. Try searching instead.");
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        onLocationSelect({
-          name: "Current Location",
-          country: "",
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-        });
-        setQuery("Current Location");
-        setShowDropdown(false);
-      },
-      () => {
-        setGeoError("Location access denied. Try searching instead.");
-      },
-    );
   };
 
   const handleClear = () => {
@@ -134,24 +109,7 @@ export function SearchBar({ app, onLocationSelect }: SearchBarProps) {
             </button>
           )}
         </div>
-        <button
-          onClick={handleGeolocation}
-          className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-sm font-medium shrink-0 hover:opacity-90 transition-opacity"
-          style={{
-            background: "var(--accent)",
-            color: "#ffffff",
-          }}
-        >
-          <MapPin size={16} />
-          <span className="hidden sm:inline">My location</span>
-        </button>
       </div>
-
-      {geoError && (
-        <p className="mt-2 text-xs" style={{ color: "#ef4444" }}>
-          {geoError}
-        </p>
-      )}
 
       {showDropdown && results.length > 0 && (
         <ul
