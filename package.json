@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "INPUT=mcp-app.html vite build",
+    "build": "INPUT=mcp-app.html vite build && node scripts/embed-ui.mjs",
     "dev": "concurrently \"INPUT=mcp-app.html vite build --watch\" \"tsx --watch main.ts\"",
     "serve": "tsx main.ts",
     "start": "npm run build && npm run serve",

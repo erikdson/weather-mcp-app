@@ -12,11 +12,27 @@ import { geocodeLocation, fetchForecast } from "./src/api/open-meteo.js";
 
 const RESOURCE_URI = "ui://weather/mcp-app.html";
 
-export function createServer() {
-  const server = new McpServer({
-    name: "Weather MCP App",
-    version: "1.0.0",
-  });
+let cachedHtml: string | null = null;
+
+async function getUiHtml(): Promise<string> {
+  if (cachedHtml) return cachedHtml;
+  try {
+    // Prefer generated module (works in bundled/serverless environments)
+    const { UI_HTML } = await import("./generated/ui-html.js");
+    cachedHtml = UI_HTML;
+    return UI_HTML;
+  } catch {
+    // Fallback to filesystem read (local development without full build)
+    const html = await fs.readFile(
+      path.join(import.meta.dirname, "dist", "mcp-app.html"),
+      "utf-8",
+    );
+    cachedHtml = html;
+    return html;
+  }
+}
+
+export function setupServer(server: McpServer) {
 
   registerAppTool(
     server,
@@ -141,10 +157,7 @@ export function createServer() {
     RESOURCE_URI,
     { mimeType: RESOURCE_MIME_TYPE },
     async () => {
-      const html = await fs.readFile(
-        path.join(import.meta.dirname, "dist", "mcp-app.html"),
-        "utf-8",
-      );
+      const html = await getUiHtml();
       return {
         contents: [
           { uri: RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: html },
@@ -152,6 +165,13 @@ export function createServer() {
       };
     },
   );
+}
 
+export function createServer() {
+  const server = new McpServer({
+    name: "Weather MCP App",
+    version: "1.0.0",
+  });
+  setupServer(server);
   return server;
 }
