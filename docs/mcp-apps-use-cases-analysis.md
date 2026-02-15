@@ -174,6 +174,113 @@ Before building an MCP App, watch for these:
 
 ---
 
+## Part 4: Authentication and Security Considerations
+
+### Do Users Need to Log In Every Time?
+
+**No.** Once a user authenticates with an MCP server, the **host (Claude) stores the access token** and reuses it across tool calls and conversations. Re-authentication only happens when:
+
+- The token expires and there's no refresh token
+- An admin revokes the token
+- The user needs additional scopes not covered by the existing token
+- The MCP server is reconfigured and session state is lost
+
+For enterprise users with SSO, the November 2025 spec introduced **Cross App Access (XAA)** -- sign in once via corporate SSO, and token exchange happens behind the scenes for each MCP server with no per-server consent screens.
+
+**Caveat:** In practice, Claude Code has known bugs where token refresh doesn't work reliably ([Issue #5706](https://github.com/anthropics/claude-code/issues/5706)), forcing manual re-auth when tokens expire.
+
+### OAuth Spec Evolution (Three Rewrites in 8 Months)
+
+| Version | Date | Key Auth Changes |
+|---|---|---|
+| **2024-11-05** | Nov 2024 | Initial spec. No standardized auth. |
+| **2025-03-26** | Mar 2025 | OAuth 2.1 + PKCE introduced. MCP server = auth server + resource server (widely criticized as unworkable for enterprise). Dynamic Client Registration and Authorization Server Metadata added. |
+| **2025-06-18** | Jun 2025 | Fixed: MCP server demoted to resource server only. Auth delegated to existing IdPs via Protected Resource Metadata (RFC 9728). Resource Indicators (RFC 8707) mandatory. |
+| **2025-11-25** | Nov 2025 | Client ID Metadata Documents (CIMD) replace Dynamic Client Registration. Cross App Access (XAA) for enterprise SSO. PKCE S256 unconditionally mandatory. |
+
+The March 2025 design was heavily criticized because it forced every MCP server developer to implement a full OAuth authorization server -- authorization endpoint, token endpoint, PKCE validation, Dynamic Client Registration. Enterprises with existing IdPs (Okta, Azure AD) had to build custom token-mapping layers or bypass the spec. The June 2025 fix properly separated concerns: MCP servers validate tokens, IdPs issue them.
+
+### How Auth Works for the Iframe UI
+
+The app iframe **has zero access to auth state**. No cookies, no localStorage, no tokens. All authenticated requests are proxied through the host:
+
+```
+App iframe                    Host (Claude)                MCP Server
+    |                              |                           |
+    |-- callServerTool() -------->|                           |
+    |   (via postMessage)         |-- tool call + Bearer ---->|
+    |                              |   token attached          |
+    |                              |<-- result ---------------|
+    |<-- result (postMessage) ----|                           |
+```
+
+The iframe communicates exclusively via JSON-RPC over `postMessage` using the `@modelcontextprotocol/ext-apps` SDK. When the app needs data, it calls `app.callServerTool()`, the host attaches the appropriate access token and proxies the request to the MCP server.
+
+**Escape hatch:** The spec supports CSP configuration via `connectDomains` in the resource's `_meta.ui` metadata, allowing the iframe to make direct `fetch` requests to whitelisted domains. But the iframe must handle its own auth for those calls -- the host's tokens are never exposed.
+
+### Token Management Details
+
+**Who holds what:**
+
+| Entity | What It Holds |
+|---|---|
+| **Host (Claude)** | Access tokens, refresh tokens, client IDs, scopes -- persisted to disk, keyed by server name |
+| **MCP Server** | Nothing. Validates tokens on each request. Acts as OAuth resource server only. |
+| **App Iframe** | Nothing. Full sandbox isolation. All data flows through `postMessage`. |
+
+Token persistence uses OS-level secure storage (Keychain on macOS, Credential Manager on Windows) when fields are marked `"sensitive": true`.
+
+### Enterprise SSO Integration
+
+**Post-November 2025 (Cross App Access / XAA):**
+
+1. User signs into the MCP client using corporate SSO (Okta, Entra ID, etc.), obtaining an ID token
+2. Instead of a separate OAuth flow per MCP server, the client performs a **token exchange** with the enterprise IdP using the Identity Assertion Authorization Grant (ID-JAG)
+3. The IdP checks enterprise policy (allowlists, conditional access rules) and issues a short-lived assertion
+4. The client presents this assertion to the MCP server's authorization server, which issues an access token
+5. **No user-facing consent screens** -- the enterprise admin configures which applications are allowed
+
+**Vendor support:** Okta has a dedicated [MCP Server](https://developer.okta.com/blog/2025/09/22/okta-mcp-server). Azure AD (Entra ID) integration is documented for Azure API Management-backed MCP servers. Auth0, WorkOS, and Scalekit provide MCP auth layers integrating with major IdPs via SAML 2.0 or OIDC.
+
+**Remaining pain:** Not all IdPs support the ID-JAG extension yet. Estimated build cost for in-house SSO-MCP integration: 6-12 weeks with 2-3 senior engineers with OAuth/identity expertise.
+
+### Auth-Specific Security Vulnerabilities
+
+#### Confused Deputy
+
+The MCP protocol does not inherently carry user identity from host to server. If the MCP server has broader privileges than the requesting user, it may execute actions the user is not authorized to trigger. The server cannot differentiate between users without additional identity-propagation mechanisms.
+
+**OAuth proxy variant:** When an MCP proxy server uses a static `client_id` with a third-party authorization server, consent cookie persistence can allow an attacker to hijack authorization without the user's explicit approval.
+
+#### Prompt Injection as Auth Bypass
+
+Tool metadata (descriptions, parameter schemas) can contain **hidden instructions** processed by the LLM but invisible in the UI. A malicious MCP server can hijack the conversation context simply by being added as a tool -- no tool invocation required. Invariant Labs demonstrated exfiltrating an entire WhatsApp history by combining tool poisoning with a legitimate whatsapp-mcp server.
+
+#### Token Leakage and Over-Permissioned Scopes
+
+Servers exposing all scopes in `scopes_supported` and clients requesting them all result in tokens with excessively broad permissions (`files:* db:* admin:*`). A single leaked token enables lateral data access and privilege chaining. The spec explicitly forbids token passthrough (forwarding client tokens to downstream APIs) -- use token exchange (RFC 8693) instead.
+
+#### Real CVEs
+
+- **CVE-2025-6514** (mcp-remote): OS command injection via crafted `authorization_endpoint`. 437,000+ downloads affected.
+- **CVE-2025-49596** (MCP Inspector < 0.14.1): RCE via lack of authentication, chainable with DNS rebinding. CVSS 9.4.
+- **Three vulnerabilities in mcp-server-git** (Anthropic's reference implementation): File read, file delete, and code execution via prompt injection.
+
+### Auth Best Practices
+
+1. **Separate auth server from resource server** -- use your existing IdP, don't build one into every MCP server
+2. **PKCE S256 unconditionally** -- both public and confidential clients
+3. **Resource Indicators (RFC 8707)** -- scope every token to a specific MCP server, preventing cross-server reuse
+4. **Never pass tokens through** -- use token exchange (RFC 8693) for downstream API calls
+5. **Least-privilege scopes** -- bind scopes to specific MCP methods, don't request everything
+6. **Route all iframe requests through the host** -- don't make authenticated calls from the iframe directly
+7. **Validate all tool inputs server-side** -- the LLM can be tricked into sending anything
+8. **Encrypt tokens at rest** -- use OS-level secure storage, mark config fields as sensitive
+9. **Implement per-client consent** -- prevent confused deputy attacks via consent cookie reuse
+10. **Plan for spec evolution** -- the auth surface has changed three times in eight months; build abstractions that can adapt
+
+---
+
 ## Sources
 
 ### Value Proposition
@@ -200,3 +307,22 @@ Before building an MCP App, watch for these:
 - [MCP Economic Impact (Sanjeev Mohan)](https://sanjmo.medium.com/to-mcp-or-not-to-mcp-part-2-economic-impact-of-the-mcp-standard-2bd0f8e961eb)
 - [Glama - MCP Real Adoption Phase](https://glama.ai/blog/2026-01-20-mcp-is-not-dead)
 - [Madrona - Two Ecosystems](https://www.madrona.com/what-mcps-rise-really-shows-a-tale-of-two-ecosystems/)
+
+### Authentication and Security
+- [MCP Authorization Spec (2025-03-26)](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization)
+- [MCP Security Best Practices (Draft Spec)](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)
+- [Auth0: MCP Spec Updates from June 2025](https://auth0.com/blog/mcp-specs-update-all-about-auth/)
+- [Stack Overflow: Authentication and Authorization in MCP](https://stackoverflow.blog/2026/01/21/is-that-allowed-authentication-and-authorization-in-model-context-protocol)
+- [Descope: Diving Into the MCP Authorization Specification](https://www.descope.com/blog/post/mcp-auth-spec)
+- [Aaron Parecki: Client Registration in November 2025 MCP Auth Spec](https://aaronparecki.com/2025/11/25/1/mcp-authorization-spec-update)
+- [Auth0: CIMD vs DCR for MCP Registration](https://auth0.com/blog/cimd-vs-dcr-mcp-registration/)
+- [Christian Posta: The Updated MCP OAuth Spec is a Mess](https://blog.christianposta.com/the-updated-mcp-oauth-spec-is-a-mess/)
+- [Solo.io: MCP Authorization is a Non-Starter for Enterprise](https://www.solo.io/blog/mcp-authorization-is-a-non-starter-for-enterprise)
+- [Okta: Cross-App Access for Enterprise AI Agents](https://www.okta.com/newsroom/articles/cross-app-access-extends-mcp-to-bring-enterprise-grade-security-to-ai-agents/)
+- [Scalekit: SSO-Backed MCP Authentication](https://www.scalekit.com/blog/sso-backed-mcp-authentication-for-enterprise-engineering-teams)
+- [Claude Help Center: Building Custom Connectors](https://support.claude.com/en/articles/11503834-building-custom-connectors-via-remote-mcp-servers)
+- [Embrace The Red: MCP Security Risks and Exploits](https://embracethered.com/blog/posts/2025/model-context-protocol-security-risks-and-exploits/)
+- [Simon Willison: MCP Has Prompt Injection Security Problems](https://simonwillison.net/2025/Apr/9/mcp-prompt-injection/)
+- [Obsidian Security: When MCP Meets OAuth - Common Pitfalls](https://www.obsidiansecurity.com/blog/when-mcp-meets-oauth-common-pitfalls-leading-to-one-click-account-takeover)
+- [AWS: Open Protocols for Agent Interoperability - Authentication on MCP](https://aws.amazon.com/blogs/opensource/open-protocols-for-agent-interoperability-part-2-authentication-on-mcp/)
+- [Curity: Design MCP Authorization to Securely Expose APIs](https://curity.io/resources/learn/design-mcp-authorization-apis/)
